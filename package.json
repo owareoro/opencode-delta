@@ -1,0 +1,15 @@
+{
+  "name": "opencode-delta",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cut OpenCode upload bytes by sending only what changed",
+  "scripts": {
+    "test": "node --test test.mjs",
+    "shim": "node --watch shim.mjs",
+    "proxy": "./opencode-proxy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.166.0"
+  }
+}

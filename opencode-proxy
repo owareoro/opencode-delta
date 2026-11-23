@@ -1,0 +1,9 @@
+#!/bin/sh
+# Start the local delta shim with its private config.
+# Place .shim.env next to this script (copy .env.example and fill it in).
+set -eu
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+set -a
+. "$DIR/.shim.env"
+set +a
+exec node --watch "$DIR/shim.mjs" "$@"

@@ -1,0 +1,17 @@
+name = "opencode-delta"
+main = "worker.mjs"
+compatibility_date = "2025-09-01"
+
+# npx wrangler kv namespace create KV -> paste the id below
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+ALLOW_HOSTS = "opencode.ai"
+KV_TTL = "14400"
+
+# Secrets (not stored in this file):
+#   npx wrangler secret put PATH_SECRET        # e.g. output of: openssl rand -hex 24
+#   npx wrangler secret put SHIM_TOKEN         # e.g. output of: openssl rand -hex 24
+#   npx wrangler secret put UPSTREAM_API_KEY   # optional, see README
