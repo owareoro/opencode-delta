@@ -32,10 +32,13 @@ import { pathToFileURL } from 'node:url';
 import { commonLen, makeRecipe, encodeRecipe, encodeFull } from './diff.mjs';
 
 const gzip = promisify(zlib.gzip);
+const gunzip = promisify(zlib.gunzip);
+const brotliDecompress = promisify(zlib.brotliDecompress);
+const zstdDecompress = promisify(zlib.zstdDecompress);
 const MiB = 1048576;
 const HOP = new Set([
   'host', 'connection', 'content-length', 'transfer-encoding', 'keep-alive', 'te', 'trailer',
-  'upgrade', 'proxy-authorization', 'proxy-authenticate', 'accept-encoding',
+  'upgrade', 'proxy-authorization', 'proxy-authenticate', 'accept-encoding', 'content-encoding',
 ]);
 const STRIP_RES = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length', 'content-encoding']);
 
@@ -56,6 +59,9 @@ export function configFromEnv(env = process.env) {
     cacheCount: 16,
     maxBody: 256 * MiB,
     fallbackDirect: env.FALLBACK_DIRECT !== '0',
+    // auto: gzip the fallback only when the incoming request was compressed; 1/0 force it.
+    fallbackGzip: env.FALLBACK_GZIP === '1' ? true : env.FALLBACK_GZIP === '0' ? false : 'auto',
+    measureGzip: env.MEASURE_GZIP !== '0',
     allowInsecure: env.ALLOW_INSECURE === '1',
     quiet: env.QUIET === '1',
     trace: env.SHIM_TRACE === '1',
@@ -81,7 +87,10 @@ const kb = (n) => `${(n / 1024).toFixed(1)}K`;
 
 export function createShim(cfg) {
   const cache = new BodyCache(cfg.cacheBytes, cfg.cacheCount);
-  const stats = { requests: 0, delta: 0, passthrough: 0, fullUploads: 0, misses: 0, fallbacks: 0, origBytes: 0, wireBytes: 0 };
+  const stats = {
+    requests: 0, delta: 0, passthrough: 0, fullUploads: 0, misses: 0, fallbacks: 0,
+    origBytes: 0, wireBytes: 0, gzipBytes: 0, gzipCount: 0, fallbackWireBytes: 0,
+  };
   const log = (...a) => { if (!cfg.quiet) console.error('[shim]', ...a); };
   const trace = (...a) => { if (cfg.trace) console.error('[trace]', ...a); };
 
@@ -127,7 +136,17 @@ export function createShim(cfg) {
       if (n > cfg.maxBody) throw Object.assign(new Error('request too large'), { status: 413 });
       chunks.push(c);
     }
-    return Buffer.concat(chunks);
+    let buf = Buffer.concat(chunks);
+    const ce = (req.headers['content-encoding'] || 'identity').toLowerCase().trim();
+    // Node's http server does not decode request bodies; do it here so the delta path
+    // works with compressed requests too. The encoding header is stripped by forwardHeaders.
+    if (ce === 'gzip') buf = await gunzip(buf);
+    else if (ce === 'br') buf = await brotliDecompress(buf);
+    else if (ce === 'zstd') buf = await zstdDecompress(buf);
+    else if (ce !== 'identity' && ce !== '') throw Object.assign(new Error(`unsupported content-encoding: ${ce}`), { status: 415 });
+    if (buf.length > cfg.maxBody) throw Object.assign(new Error('request too large'), { status: 413 });
+    req._decodedEncoding = ce === '' ? 'identity' : ce;
+    return buf;
   }
 
   function forwardHeaders(req) {
@@ -194,22 +213,33 @@ export function createShim(cfg) {
   }
 
   // ---------- request paths ----------
-  async function passthrough(req, res, target, body, signal) {
+  async function passthrough(req, res, target, body, signal, opts = {}) {
     stats.passthrough++;
-    trace('direct send', req.method, target.href, { body: body.length });
+    const headers = forwardHeaders(req);
+    let out = body;
+    // Only the Worker-unavailable fallback opts in; normal passthrough stays untouched.
+    if (opts.gzip && body.length >= 512 && req.method !== 'GET' && req.method !== 'HEAD') {
+      out = opts.gzipBuffer || await gzip(body, { level: 6 });
+      headers['content-encoding'] = 'gzip';
+    }
+    trace('direct send', req.method, target.href, { body: body.length, wire: out.length, gzip: !!headers['content-encoding'] });
     const t0 = Date.now();
     const r = await fetch(target, {
-      method: req.method, headers: forwardHeaders(req),
-      body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body,
+      method: req.method, headers,
+      body: req.method === 'GET' || req.method === 'HEAD' ? undefined : out,
       signal, redirect: 'manual',
     });
     trace('direct response', r.status, { ms: Date.now() - t0, ct: r.headers.get('content-type'), te: r.headers.get('transfer-encoding') });
     await pipeResponse(r, res);
+    return out.length;
   }
 
   async function relayDelta(req, res, target, body, signal) {
     const hash = sha256(body);
     const store = body.length >= cfg.storeMin;
+    // Baseline for "how much did delta save vs gzip": same level the shim uses for recipes.
+    const gzBuf = cfg.measureGzip && body.length >= 512 ? await gzip(body, { level: 6 }) : null;
+    if (gzBuf) { stats.gzipBytes += gzBuf.length; stats.gzipCount++; }
     let p = plan(body);
     trace('worker send', req.method, req.url, { body: body.length, base: !!p.baseHash, recipe: p.recipe.length, store });
     const tw0 = Date.now();
@@ -232,10 +262,15 @@ export function createShim(cfg) {
     const workerBroke = !r || !r.headers.get('x-delta-worker');
     if (workerBroke && cfg.fallbackDirect) {
       stats.fallbacks++;
-      log(`!! Worker unavailable (${r ? `HTTP ${r.status}` : 'network error'}); sending DIRECT, full body ${kb(body.length)}`);
+      const useGzip = cfg.fallbackGzip === true ||
+        (cfg.fallbackGzip === 'auto' && !!req._decodedEncoding && req._decodedEncoding !== 'identity');
+      log(`!! Worker unavailable (${r ? `HTTP ${r.status}` : 'network error'}); sending DIRECT` +
+        (useGzip && gzBuf ? ` gzip ${kb(gzBuf.length)}` : ` full body ${kb(body.length)}`));
       if (r) await r.arrayBuffer().catch(() => {});
-      stats.origBytes += body.length; stats.wireBytes += body.length;
-      return passthrough(req, res, target, body, signal);
+      stats.origBytes += body.length;
+      const wire = await passthrough(req, res, target, body, signal, { gzip: !!useGzip, gzipBuffer: gzBuf });
+      stats.wireBytes += wire; stats.fallbackWireBytes += wire;
+      return;
     }
     if (!r) throw new Error('Worker unreachable');
 
@@ -244,8 +279,9 @@ export function createShim(cfg) {
 
     stats.delta++; if (!p.baseHash) stats.fullUploads++;
     stats.origBytes += body.length; stats.wireBytes += totalWire;
+    const gzNote = gzBuf ? `  gzip would be ${kb(gzBuf.length)} (${(gzBuf.length / Math.max(1, totalWire)).toFixed(0)}x smaller)` : '';
     log(`${req.method} ${new URL(req.url, 'http://x').pathname}  body ${kb(body.length)} -> wire ${kb(totalWire)}` +
-      (p.baseHash ? `  (${((p.shared / body.length) * 100).toFixed(0)}% shared prefix)` : '  (full)'));
+      (p.baseHash ? `  (${((p.shared / body.length) * 100).toFixed(0)}% shared prefix)` : '  (full)') + gzNote);
     await pipeResponse(r, res);
   }
 
@@ -270,8 +306,8 @@ export function createShim(cfg) {
       if (!res.writableFinished) ac.abort();
     });
 
-    const ce = (req.headers['content-encoding'] || 'identity').toLowerCase();
-    const eligible = req.method === 'POST' && cfg.deltaPaths.test(target.pathname) && ce === 'identity' &&
+    // Compressed bodies are decoded in readBody, so content-encoding no longer excludes the delta path.
+    const eligible = req.method === 'POST' && cfg.deltaPaths.test(target.pathname) &&
       /json/i.test(req.headers['content-type'] || '') && body.length > 0 && cfg.workerUrl && cfg.token;
     return eligible ? relayDelta(req, res, target, body, ac.signal) : passthrough(req, res, target, body, ac.signal);
   }

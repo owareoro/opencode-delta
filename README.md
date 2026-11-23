@@ -66,7 +66,9 @@ Check it:
 curl -s http://127.0.0.1:8787/__shim/health
 ```
 
-The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. Each request logs body size, wire size, and the shared-prefix percentage. Set `SHIM_TRACE=1` for verbose per-request tracing.
+The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. It also includes `gzipBytes` / `gzipCount` (what a gzip-only approach would have cost for the same bodies) and `fallbackWireBytes` (actual bytes sent on fallback), so you can compare delta savings against gzip directly. Each request log line includes the same gzip comparison. Set `SHIM_TRACE=1` for verbose per-request tracing.
+
+Incoming gzipped/br/zstd request bodies are decoded before diffing, so the delta path works with compressed clients. `Content-Encoding` is stripped before forwarding.
 
 ## OpenCode v2 config
 
@@ -109,6 +111,8 @@ Shim (`.shim.env`):
 | `BASE_MIN` | `4096` | Minimum shared prefix before using a base |
 | `CACHE_MB` | `256` | In-memory body cache |
 | `FALLBACK_DIRECT` | on | Set `0` to disable direct fallback when the Worker is down |
+| `FALLBACK_GZIP` | `auto` | `auto`: gzip the fallback only if the incoming request was compressed; `1` force on, `0` off |
+| `MEASURE_GZIP` | on | Set `0` to skip the gzip baseline calculation |
 | `SHIM_TRACE` | off | Set `1` for verbose logging |
 
 Worker (`wrangler.toml` / secrets):
@@ -145,7 +149,7 @@ Worker (`wrangler.toml` / secrets):
 npm test
 ```
 
-11 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
+14 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
 
 ## License
 

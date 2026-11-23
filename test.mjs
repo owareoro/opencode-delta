@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import worker, { applyRecipe } from './worker.mjs';
 import { makeRecipe, encodeRecipe } from './diff.mjs';
 import { createShim, configFromEnv } from './shim.mjs';
@@ -32,7 +33,9 @@ async function startUpstream() {
   const seen = [];
   const server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
-    seen.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks) });
+    let body = Buffer.concat(chunks);
+    if ((req.headers['content-encoding'] || '').toLowerCase() === 'gzip') body = zlib.gunzipSync(body);
+    seen.push({ method: req.method, url: req.url, headers: req.headers, body });
     if (req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end('{"data":[]}'); }
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write('data: 1\n\n');
@@ -103,6 +106,9 @@ function session() {
 
 const post = (url, body, headers = {}) =>
   fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
+
+const postGzip = (url, body, headers = {}) =>
+  post(url, zlib.gzipSync(body), { 'content-encoding': 'gzip', ...headers });
 
 // ---------------------------------------------------------------- diff
 test('diff: random edits always rebuild exactly, and local edits stay small', () => {
@@ -226,6 +232,54 @@ test('e2e: broken Worker -> falls back to a direct upstream call', async () => {
     assert.equal(r.status, 200); await r.text();
     assert.ok(t.up.seen.at(-1).body.equals(body));
     assert.equal(t.shim.stats.fallbacks, 1);
+  } finally { await t.stop(); }
+});
+
+test('e2e: compressed request is decoded and still takes the delta path', async () => {
+  const t = await startAll();
+  try {
+    const s = session(); s.add(16);
+    const body = s.body();
+    let r = await postGzip(`${t.base}/zen/v1/messages`, body);
+    assert.equal(r.status, 200); await r.text();
+    assert.ok(t.up.seen.at(-1).body.equals(body));
+    assert.equal(t.shim.stats.delta, 1);
+    assert.equal(t.shim.stats.fallbacks, 0);
+    s.add(16);
+    const body2 = s.body();
+    r = await postGzip(`${t.base}/zen/v1/messages`, body2);
+    assert.equal(r.status, 200); await r.text();
+    assert.ok(t.up.seen.at(-1).body.equals(body2));
+    assert.ok(t.shim.stats.gzipBytes > 0);
+    assert.ok(t.shim.stats.wireBytes < body2.length);
+  } finally { await t.stop(); }
+});
+
+test('e2e: fallback gzips when the incoming request was compressed', async () => {
+  const t = await startAll();
+  try {
+    t.w.state.fail = true;
+    const s = session(); s.add(40);
+    const body = s.body();
+    const r = await postGzip(`${t.base}/zen/v1/chat/completions`, body);
+    assert.equal(r.status, 200); await r.text();
+    assert.equal(t.up.seen.at(-1).headers['content-encoding'], 'gzip');
+    assert.ok(t.up.seen.at(-1).body.equals(body));
+    assert.ok(t.shim.stats.fallbackWireBytes < body.length);
+  } finally { await t.stop(); }
+});
+
+test('e2e: fallback stays uncompressed for plain requests', async () => {
+  const t = await startAll();
+  try {
+    t.w.state.fail = true;
+    const s = session(); s.add(40);
+    const body = s.body();
+    const r = await post(`${t.base}/zen/v1/chat/completions`, body);
+    assert.equal(r.status, 200); await r.text();
+    assert.equal(t.up.seen.at(-1).headers['content-encoding'], undefined);
+    assert.ok(t.up.seen.at(-1).body.equals(body));
+    assert.equal(t.shim.stats.fallbackWireBytes, body.length);
   } finally { await t.stop(); }
 });
 
