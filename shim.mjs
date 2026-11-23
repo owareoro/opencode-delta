@@ -20,6 +20,7 @@
 //   STORE_MIN       only store bodies >= this many bytes in the Worker's KV (default 32768)
 //   BASE_MIN        minimum shared prefix to bother with a base (default 4096)
 //   CACHE_MB        memory for remembered bodies (default 256)
+//   CACHE_COUNT     max remembered bodies, i.e. roughly concurrent sessions (default 16)
 //   FALLBACK_DIRECT "0" to disable falling back to a direct upstream call if the Worker is broken
 //   ALLOW_INSECURE  "1" allows http:// targets (tests only)
 
@@ -58,7 +59,7 @@ export function configFromEnv(env = process.env) {
     storeAgeMs: (Number.isFinite(Number(env.STORE_AGE_MAX)) ? Number(env.STORE_AGE_MAX) : 3600) * 1000,
     baseMin: Number(env.BASE_MIN) || 4096,
     cacheBytes: (Number(env.CACHE_MB) || 256) * MiB,
-    cacheCount: 16,
+    cacheCount: Number(env.CACHE_COUNT) || 16,
     maxBody: 256 * MiB,
     fallbackDirect: env.FALLBACK_DIRECT !== '0',
     // auto: gzip the fallback only if the incoming request was compressed; 1/0 force it.

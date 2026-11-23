@@ -125,6 +125,11 @@ const post = (url, body, headers = {}) =>
 const postGzip = (url, body, headers = {}) =>
   post(url, zlib.gzipSync(body), { 'content-encoding': 'gzip', ...headers });
 
+test('config: CACHE_COUNT is configurable', () => {
+  assert.equal(configFromEnv({}).cacheCount, 16);
+  assert.equal(configFromEnv({ CACHE_COUNT: '64' }).cacheCount, 64);
+});
+
 // ---------------------------------------------------------------- diff
 test('diff: random edits always rebuild exactly, and local edits stay small', () => {
   for (let c = 0; c < 150; c++) {

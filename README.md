@@ -111,7 +111,8 @@ Shim (`.shim.env`):
 | `STORE_DELTA_MIN` | `65536` | Commit a new base when the recipe grows past this many bytes |
 | `STORE_AGE_MAX` | `3600` | Or when the pinned base is this many seconds old |
 | `BASE_MIN` | `4096` | Minimum shared prefix before using a base |
-| `CACHE_MB` | `256` | In-memory body cache |
+| `CACHE_MB` | `256` | In-memory body cache (bytes cap) |
+| `CACHE_COUNT` | `16` | Max remembered bodies, roughly concurrent sessions |
 | `FALLBACK_DIRECT` | on | Set `0` to disable direct fallback when the Worker is down |
 | `FALLBACK_GZIP` | `auto` | `auto`: gzip the fallback only if the incoming request was compressed; `1` force on, `0` force off |
 | `SHIM_TRACE` | off | Set `1` for verbose logging |
