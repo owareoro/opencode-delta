@@ -66,7 +66,7 @@ Check it:
 curl -s http://127.0.0.1:8787/__shim/health
 ```
 
-The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. It also includes `gzipBytes` / `gzipCount` (what a gzip-only approach would have cost for the same bodies) and `fallbackWireBytes` (actual bytes sent on fallback), so you can compare delta savings against gzip directly. Each request log line includes the same gzip comparison. Set `SHIM_TRACE=1` for verbose per-request tracing.
+The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. `incomingBytes` is the actual number of bytes OpenCode sent to the shim — i.e. what a direct, no-proxy upload would have put on the wire — and `compressedRequests` counts how many of those arrived with `Content-Encoding`. `fallbackWireBytes` records actual bytes sent on fallback. Each request log line shows the incoming size and encoding alongside the wire size. Set `SHIM_TRACE=1` for verbose per-request tracing.
 
 Incoming gzipped/br/zstd request bodies are decoded before diffing, so the delta path works with compressed clients. `Content-Encoding` is stripped before forwarding.
 
@@ -80,8 +80,7 @@ The most reliable setup is to override the **built-in** provider's `baseURL` so 
   "providers": {
     "opencode-go": {
       "settings": {
-        "baseURL": "http://127.0.0.1:8787/go/v1",
-        "encoding": "none"
+        "baseURL": "http://127.0.0.1:8787/go/v1"
       }
     }
   }
@@ -112,7 +111,6 @@ Shim (`.shim.env`):
 | `CACHE_MB` | `256` | In-memory body cache |
 | `FALLBACK_DIRECT` | on | Set `0` to disable direct fallback when the Worker is down |
 | `FALLBACK_GZIP` | `auto` | `auto`: gzip the fallback only if the incoming request was compressed; `1` force on, `0` off |
-| `MEASURE_GZIP` | on | Set `0` to skip the gzip baseline calculation |
 | `SHIM_TRACE` | off | Set `1` for verbose logging |
 
 Worker (`wrangler.toml` / secrets):
@@ -138,7 +136,7 @@ Worker (`wrangler.toml` / secrets):
 - **Worker CPU:** copying the stored body takes ~1 ms at 0.4 MB, ~8 ms at 10 MB. Free plan allows 10 ms per invocation; large histories may be tight.
 - Bodies over 25 MiB are forwarded but not stored.
 - After compaction/pruning rewrites old history, the next request re-uploads most of the body once, then deltas resume.
-- Requests with `Content-Encoding` skip the delta path; leave encoding off (`"encoding": "none"`).
+- Incoming compressed request bodies are decoded before diffing, so `Content-Encoding` no longer excludes a request from the delta path.
 - If the Worker is unreachable, the shim logs a warning and sends the request directly with the full body. Set `FALLBACK_DIRECT=0` to disable.
 - **Important:** Zen free-tier models reject traffic relayed through a Cloudflare Worker egress IP (`429 Free usage limit reached`). Deltas work with OpenCode Go / paid traffic. This is a reason to prefer native support inside the client.
 - `!! Worker rejected SHIM_TOKEN (401)` is logged for *any* upstream 401, not just token failures.

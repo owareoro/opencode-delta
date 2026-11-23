@@ -61,7 +61,6 @@ export function configFromEnv(env = process.env) {
     fallbackDirect: env.FALLBACK_DIRECT !== '0',
     // auto: gzip the fallback only when the incoming request was compressed; 1/0 force it.
     fallbackGzip: env.FALLBACK_GZIP === '1' ? true : env.FALLBACK_GZIP === '0' ? false : 'auto',
-    measureGzip: env.MEASURE_GZIP !== '0',
     allowInsecure: env.ALLOW_INSECURE === '1',
     quiet: env.QUIET === '1',
     trace: env.SHIM_TRACE === '1',
@@ -89,7 +88,7 @@ export function createShim(cfg) {
   const cache = new BodyCache(cfg.cacheBytes, cfg.cacheCount);
   const stats = {
     requests: 0, delta: 0, passthrough: 0, fullUploads: 0, misses: 0, fallbacks: 0,
-    origBytes: 0, wireBytes: 0, gzipBytes: 0, gzipCount: 0, fallbackWireBytes: 0,
+    origBytes: 0, wireBytes: 0, incomingBytes: 0, compressedRequests: 0, fallbackWireBytes: 0,
   };
   const log = (...a) => { if (!cfg.quiet) console.error('[shim]', ...a); };
   const trace = (...a) => { if (cfg.trace) console.error('[trace]', ...a); };
@@ -136,6 +135,7 @@ export function createShim(cfg) {
       if (n > cfg.maxBody) throw Object.assign(new Error('request too large'), { status: 413 });
       chunks.push(c);
     }
+    req._wireIn = n; // actual bytes OpenCode sent -- what a direct (no-proxy) upload would cost
     let buf = Buffer.concat(chunks);
     const ce = (req.headers['content-encoding'] || 'identity').toLowerCase().trim();
     // Node's http server does not decode request bodies; do it here so the delta path
@@ -237,9 +237,6 @@ export function createShim(cfg) {
   async function relayDelta(req, res, target, body, signal) {
     const hash = sha256(body);
     const store = body.length >= cfg.storeMin;
-    // Baseline for "how much did delta save vs gzip": same level the shim uses for recipes.
-    const gzBuf = cfg.measureGzip && body.length >= 512 ? await gzip(body, { level: 6 }) : null;
-    if (gzBuf) { stats.gzipBytes += gzBuf.length; stats.gzipCount++; }
     let p = plan(body);
     trace('worker send', req.method, req.url, { body: body.length, base: !!p.baseHash, recipe: p.recipe.length, store });
     const tw0 = Date.now();
@@ -265,10 +262,10 @@ export function createShim(cfg) {
       const useGzip = cfg.fallbackGzip === true ||
         (cfg.fallbackGzip === 'auto' && !!req._decodedEncoding && req._decodedEncoding !== 'identity');
       log(`!! Worker unavailable (${r ? `HTTP ${r.status}` : 'network error'}); sending DIRECT` +
-        (useGzip && gzBuf ? ` gzip ${kb(gzBuf.length)}` : ` full body ${kb(body.length)}`));
+        (useGzip ? ' gzip' : ' full body') + ` ${kb(body.length)}`);
       if (r) await r.arrayBuffer().catch(() => {});
       stats.origBytes += body.length;
-      const wire = await passthrough(req, res, target, body, signal, { gzip: !!useGzip, gzipBuffer: gzBuf });
+      const wire = await passthrough(req, res, target, body, signal, { gzip: !!useGzip });
       stats.wireBytes += wire; stats.fallbackWireBytes += wire;
       return;
     }
@@ -279,9 +276,12 @@ export function createShim(cfg) {
 
     stats.delta++; if (!p.baseHash) stats.fullUploads++;
     stats.origBytes += body.length; stats.wireBytes += totalWire;
-    const gzNote = gzBuf ? `  gzip would be ${kb(gzBuf.length)} (${(gzBuf.length / Math.max(1, totalWire)).toFixed(0)}x smaller)` : '';
-    log(`${req.method} ${new URL(req.url, 'http://x').pathname}  body ${kb(body.length)} -> wire ${kb(totalWire)}` +
-      (p.baseHash ? `  (${((p.shared / body.length) * 100).toFixed(0)}% shared prefix)` : '  (full)') + gzNote);
+    const compressed = req._decodedEncoding && req._decodedEncoding !== 'identity';
+    const inNote = compressed
+      ? `in ${req._decodedEncoding} ${kb(req._wireIn)} (decoded ${kb(body.length)})`
+      : `in plain ${kb(req._wireIn)}`;
+    log(`${req.method} ${new URL(req.url, 'http://x').pathname}  ${inNote} -> wire ${kb(totalWire)}` +
+      (p.baseHash ? `  (${((p.shared / body.length) * 100).toFixed(0)}% shared prefix)` : '  (full)'));
     await pipeResponse(r, res);
   }
 
@@ -299,7 +299,9 @@ export function createShim(cfg) {
 
     stats.requests++;
     const body = await readBody(req);
-    trace('request', req.method, req.url, { body: body.length, ct: req.headers['content-type'], ce: req.headers['content-encoding'] });
+    stats.incomingBytes += req._wireIn;
+    if (req._decodedEncoding && req._decodedEncoding !== 'identity') stats.compressedRequests++;
+    trace('request', req.method, req.url, { wireIn: req._wireIn, decoded: body.length, ct: req.headers['content-type'], ce: req._decodedEncoding });
     const ac = new AbortController();
     res.on('close', () => {
       trace('client close', req.url, { finished: res.writableFinished, aborted: ac.signal.aborted });

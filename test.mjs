@@ -250,7 +250,8 @@ test('e2e: compressed request is decoded and still takes the delta path', async 
     r = await postGzip(`${t.base}/zen/v1/messages`, body2);
     assert.equal(r.status, 200); await r.text();
     assert.ok(t.up.seen.at(-1).body.equals(body2));
-    assert.ok(t.shim.stats.gzipBytes > 0);
+    assert.equal(t.shim.stats.compressedRequests, 2);
+    assert.ok(t.shim.stats.incomingBytes > t.shim.stats.wireBytes);
     assert.ok(t.shim.stats.wireBytes < body2.length);
   } finally { await t.stop(); }
 });
