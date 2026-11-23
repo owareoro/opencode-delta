@@ -26,12 +26,13 @@ Real-world result on a Go session: a **702 KB** request body became **~0.2 KB** 
 ## Deploy the Worker
 
 ```sh
-npm install                       # installs wrangler as a dev dependency
+npm ci                            # installs wrangler from package-lock.json
+cp wrangler.toml.example wrangler.toml
 npx wrangler login                # or use CLOUDFLARE_API_TOKEN
 npx wrangler kv namespace create KV
 ```
 
-Paste the returned namespace ID into `wrangler.toml` where it says `REPLACE_WITH_KV_NAMESPACE_ID`.
+Paste the returned namespace ID into your local `wrangler.toml` where it says `REPLACE_WITH_KV_NAMESPACE_ID` (`wrangler.toml` is gitignored; `wrangler.toml.example` is the tracked template).
 
 Generate two secrets and upload them:
 
