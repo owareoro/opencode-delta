@@ -256,13 +256,13 @@ test('e2e: compressed request is decoded and still takes the delta path', async 
   } finally { await t.stop(); }
 });
 
-test('e2e: fallback gzips when the incoming request was compressed', async () => {
+test('e2e: fallback gzips even plain requests by default', async () => {
   const t = await startAll();
   try {
     t.w.state.fail = true;
     const s = session(); s.add(40);
     const body = s.body();
-    const r = await postGzip(`${t.base}/zen/v1/chat/completions`, body);
+    const r = await post(`${t.base}/zen/v1/chat/completions`, body);
     assert.equal(r.status, 200); await r.text();
     assert.equal(t.up.seen.at(-1).headers['content-encoding'], 'gzip');
     assert.ok(t.up.seen.at(-1).body.equals(body));
@@ -270,8 +270,8 @@ test('e2e: fallback gzips when the incoming request was compressed', async () =>
   } finally { await t.stop(); }
 });
 
-test('e2e: fallback stays uncompressed for plain requests', async () => {
-  const t = await startAll();
+test('e2e: fallback compression can be disabled explicitly', async () => {
+  const t = await startAll({ fallbackGzip: false });
   try {
     t.w.state.fail = true;
     const s = session(); s.add(40);

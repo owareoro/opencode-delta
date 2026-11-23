@@ -59,8 +59,8 @@ export function configFromEnv(env = process.env) {
     cacheCount: 16,
     maxBody: 256 * MiB,
     fallbackDirect: env.FALLBACK_DIRECT !== '0',
-    // auto: gzip the fallback only when the incoming request was compressed; 1/0 force it.
-    fallbackGzip: env.FALLBACK_GZIP === '1' ? true : env.FALLBACK_GZIP === '0' ? false : 'auto',
+    // OpenCode does not compress requests to localhost, so fallback gzip is on by default.
+    fallbackGzip: env.FALLBACK_GZIP !== '0',
     allowInsecure: env.ALLOW_INSECURE === '1',
     quiet: env.QUIET === '1',
     trace: env.SHIM_TRACE === '1',
@@ -259,8 +259,7 @@ export function createShim(cfg) {
     const workerBroke = !r || !r.headers.get('x-delta-worker');
     if (workerBroke && cfg.fallbackDirect) {
       stats.fallbacks++;
-      const useGzip = cfg.fallbackGzip === true ||
-        (cfg.fallbackGzip === 'auto' && !!req._decodedEncoding && req._decodedEncoding !== 'identity');
+      const useGzip = cfg.fallbackGzip;
       log(`!! Worker unavailable (${r ? `HTTP ${r.status}` : 'network error'}); sending DIRECT` +
         (useGzip ? ' gzip' : ' full body') + ` ${kb(body.length)}`);
       if (r) await r.arrayBuffer().catch(() => {});

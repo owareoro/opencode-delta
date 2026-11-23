@@ -110,7 +110,7 @@ Shim (`.shim.env`):
 | `BASE_MIN` | `4096` | Minimum shared prefix before using a base |
 | `CACHE_MB` | `256` | In-memory body cache |
 | `FALLBACK_DIRECT` | on | Set `0` to disable direct fallback when the Worker is down |
-| `FALLBACK_GZIP` | `auto` | `auto`: gzip the fallback only if the incoming request was compressed; `1` force on, `0` off |
+| `FALLBACK_GZIP` | on | Gzip the full body on fallback (OpenCode does not compress localhost requests); set `0` to disable |
 | `SHIM_TRACE` | off | Set `1` for verbose logging |
 
 Worker (`wrangler.toml` / secrets):
