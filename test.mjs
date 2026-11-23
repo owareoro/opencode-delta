@@ -377,6 +377,26 @@ test('worker: refreshes the base when it ages out', async () => {
   } finally { await t.stop(); }
 });
 
+test('worker: keeps a separate pinned base per session', async () => {
+  const t = await startAll({ storeDeltaMin: 1000000, storeAgeMs: 3600000 });
+  try {
+    const a = session(), b = session();
+    for (let i = 0; i < 4; i++) {
+      a.add(16); b.add(16);
+      for (const [id, s] of [['s1', a], ['s2', b]]) {
+        const body = s.body();
+        const r = await post(`${t.base}/zen/v1/messages`, body, { 'x-opencode-session': id });
+        assert.equal(r.status, 200); await r.text();
+        assert.ok(t.up.seen.at(-1).body.equals(body), `${id} turn ${i}: upstream body differs`);
+      }
+    }
+    const health = await (await fetch(`${t.base}/__shim/health`)).json();
+    assert.equal(health.pinnedBases, 2);
+    assert.equal(t.w.kv.writes, 2);
+    assert.equal(t.shim.stats.misses, 0);
+  } finally { await t.stop(); }
+});
+
 test('worker: keeps using the old base when KV writes run out', async () => {
   const t = await startAll({ storeDeltaMin: 1000000, storeAgeMs: 3600000 });
   try {

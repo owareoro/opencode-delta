@@ -94,8 +94,12 @@ export function createShim(cfg) {
     origBytes: 0, wireBytes: 0, incomingBytes: 0, compressedRequests: 0, fallbackWireBytes: 0,
     totalMs: 0, lastMs: 0, workerMs: 0, pipeMs: 0, stores: 0,
   };
-  // The base hash the Worker currently holds. Reused across turns until it stores a new one.
-  let pinned = null;
+  // One committed base per OpenCode session, so concurrent sessions don't churn each other's base.
+  const pinned = new Map();
+  const sessionKey = (req) => String(
+    req.headers['x-opencode-session'] || req.headers['x-opencode-session-id'] ||
+    req.headers['x-session-id'] || 'default'
+  );
   const log = (...a) => { if (!cfg.quiet) console.error('[shim]', ...a); };
   const trace = (...a) => { if (cfg.trace) console.error('[trace]', ...a); };
 
@@ -190,19 +194,20 @@ export function createShim(cfg) {
   }
 
   // ---------- delta planning ----------
-  function plan(body) {
-    // With pinning, always diff against the base the Worker still holds so one base can serve
+  function plan(body, key) {
+    // With pinning, always diff against this session's committed base so one base can serve
     // several turns. Without it, fall back to the best-matching cached body.
-    if (cfg.pinBase && pinned) {
-      const n = commonLen(pinned.body, 0, body, 0);
+    const pin = pinned.get(key);
+    if (cfg.pinBase && pin) {
+      const n = commonLen(pin.body, 0, body, 0);
       if (n >= cfg.baseMin) {
-        const recipe = encodeRecipe(makeRecipe(pinned.body, body), body);
-        if (recipe.length < body.length * 0.9) return { baseHash: pinned.hash, recipe, shared: n };
+        const recipe = encodeRecipe(makeRecipe(pin.body, body), body);
+        if (recipe.length < body.length * 0.9) return { baseHash: pin.hash, recipe, shared: n };
       }
     }
     let best = null, bestHash = null, bestN = 0;
     for (const [h, buf] of cache.entries()) { // oldest -> newest, so ties go to the newest
-      if (cfg.pinBase && pinned && h === pinned.hash) continue;
+      if (cfg.pinBase && pin && h === pin.hash) continue;
       const n = commonLen(buf, 0, body, 0);
       if (n >= bestN) { best = buf; bestHash = h; bestN = n; }
     }
@@ -258,12 +263,14 @@ export function createShim(cfg) {
 
   async function relayDelta(req, res, target, body, signal) {
     const hash = sha256(body);
-    let p = plan(body);
-    // The shim owns the write decision: reuse the committed base until the recipe grows
-    // past STORE_DELTA_MIN or the base ages past STORE_AGE_MAX. If the write fails, keep
-    // using the old base (pinned stays unchanged) instead of re-uploading every turn.
-    const age = pinned ? Date.now() - pinned.at : Infinity;
-    const shouldStore = !cfg.pinBase || !pinned ||
+    const key = sessionKey(req);
+    const pin = pinned.get(key);
+    let p = plan(body, key);
+    // The shim owns the write decision: reuse this session's committed base until the recipe
+    // grows past STORE_DELTA_MIN or the base ages past STORE_AGE_MAX. On a failed write, keep
+    // the old base instead of re-uploading every turn.
+    const age = pin ? Date.now() - pin.at : Infinity;
+    const shouldStore = !cfg.pinBase || !pin ||
       p.recipe.length >= cfg.storeDeltaMin || age >= cfg.storeAgeMs;
     let store = body.length >= cfg.storeMin && shouldStore;
     trace('worker send', req.method, req.url, { body: body.length, base: !!p.baseHash, recipe: p.recipe.length, store });
@@ -279,7 +286,7 @@ export function createShim(cfg) {
     if (r && r.status === 409 && r.headers.get('x-delta-miss')) {
       stats.misses++;
       if (p.baseHash) cache.delete(p.baseHash);
-      if (cfg.pinBase) pinned = null;
+      if (cfg.pinBase) pinned.delete(key);
       await r.arrayBuffer().catch(() => {});
       p = { baseHash: null, recipe: encodeFull(body), shared: 0 };
       store = body.length >= cfg.storeMin; // a lost base must always be re-stored
@@ -308,10 +315,10 @@ export function createShim(cfg) {
     if (stored) {
       stats.stores++;
       if (store) cache.put(hash, body);
-      if (cfg.pinBase) pinned = { hash, body, at: Date.now() };
-    } else if (cfg.pinBase && currentBase && pinned && currentBase !== pinned.hash) {
+      if (cfg.pinBase) pinned.set(key, { hash, body, at: Date.now() });
+    } else if (cfg.pinBase && currentBase && pin && currentBase !== pin.hash) {
       // Worker kept or switched to a different base; follow it.
-      pinned = null;
+      pinned.delete(key);
     }
 
     stats.delta++; if (!p.baseHash) stats.fullUploads++;
@@ -332,7 +339,7 @@ export function createShim(cfg) {
     }
     if (req.url === '/__shim/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, stats, cachedBodies: cache.m.size, cachedBytes: cache.bytes }));
+      return res.end(JSON.stringify({ ok: true, stats, pinnedBases: pinned.size, cachedBodies: cache.m.size, cachedBytes: cache.bytes }));
     }
     const target = resolveTarget(req.url);
     if (!target) { res.writeHead(404); return res.end('unknown or disallowed target'); }
