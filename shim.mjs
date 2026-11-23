@@ -59,8 +59,8 @@ export function configFromEnv(env = process.env) {
     cacheCount: 16,
     maxBody: 256 * MiB,
     fallbackDirect: env.FALLBACK_DIRECT !== '0',
-    // OpenCode does not compress requests to localhost, so fallback gzip is on by default.
-    fallbackGzip: env.FALLBACK_GZIP !== '0',
+    // Zen/Go rejects gzipped request bodies with an empty 400, so fallback gzip is opt-in.
+    fallbackGzip: env.FALLBACK_GZIP === '1',
     allowInsecure: env.ALLOW_INSECURE === '1',
     quiet: env.QUIET === '1',
     trace: env.SHIM_TRACE === '1',
