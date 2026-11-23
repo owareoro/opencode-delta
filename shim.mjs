@@ -38,7 +38,7 @@ const zstdDecompress = promisify(zlib.zstdDecompress);
 const MiB = 1048576;
 const HOP = new Set([
   'host', 'connection', 'content-length', 'transfer-encoding', 'keep-alive', 'te', 'trailer',
-  'upgrade', 'proxy-authorization', 'proxy-authenticate', 'accept-encoding', 'content-encoding',
+  'upgrade', 'proxy-authorization', 'proxy-authenticate', 'accept-encoding', 'content-encoding', 'expect',
 ]);
 const STRIP_RES = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length', 'content-encoding']);
 
@@ -89,6 +89,7 @@ export function createShim(cfg) {
   const stats = {
     requests: 0, delta: 0, passthrough: 0, fullUploads: 0, misses: 0, fallbacks: 0,
     origBytes: 0, wireBytes: 0, incomingBytes: 0, compressedRequests: 0, fallbackWireBytes: 0,
+    totalMs: 0, lastMs: 0, workerMs: 0, pipeMs: 0,
   };
   const log = (...a) => { if (!cfg.quiet) console.error('[shim]', ...a); };
   const trace = (...a) => { if (cfg.trace) console.error('[trace]', ...a); };
@@ -175,6 +176,7 @@ export function createShim(cfg) {
         if (!res.write(chunk)) await once(res, 'drain');
       }
       res.end();
+      stats.pipeMs += Date.now() - t0;
       trace('pipe end', { bytes, chunks, ms: Date.now() - t0, finished: res.writableFinished });
     } catch (e) {
       trace('pipe error', e.message, { bytes, chunks, ms: Date.now() - t0 });
@@ -246,9 +248,10 @@ export function createShim(cfg) {
     trace('worker send', req.method, req.url, { body: body.length, base: !!p.baseHash, recipe: p.recipe.length, store });
     const tw0 = Date.now();
     let { r, wire, err } = await sendViaWorker(req, target, body, p, hash, store, signal).catch((e) => ({ err: e }));
+    stats.workerMs += Date.now() - tw0;
     trace('worker response', r ? r.status : 'network error', {
       ms: Date.now() - tw0, worker: r?.headers.get('x-delta-worker'), stored: r?.headers.get('x-delta-stored'),
-      ct: r?.headers.get('content-type'), te: r?.headers.get('transfer-encoding'), err: err?.message,
+      ct: r?.headers.get('content-type'), te: r?.headers.get('transfer-encoding'), err: err?.message, code: err?.cause?.code,
     });
     let totalWire = wire || 0;
 
@@ -303,13 +306,16 @@ export function createShim(cfg) {
     if (!target) { res.writeHead(404); return res.end('unknown or disallowed target'); }
 
     stats.requests++;
+    const t0 = Date.now();
     const body = await readBody(req);
     stats.incomingBytes += req._wireIn;
     if (req._decodedEncoding && req._decodedEncoding !== 'identity') stats.compressedRequests++;
     trace('request', req.method, req.url, { wireIn: req._wireIn, decoded: body.length, ct: req.headers['content-type'], ce: req._decodedEncoding });
     const ac = new AbortController();
     res.on('close', () => {
-      trace('client close', req.url, { finished: res.writableFinished, aborted: ac.signal.aborted });
+      const ms = Date.now() - t0;
+      stats.totalMs += ms; stats.lastMs = ms;
+      trace('client close', req.url, { finished: res.writableFinished, aborted: ac.signal.aborted, ms });
       if (!res.writableFinished) ac.abort();
     });
 
@@ -321,7 +327,7 @@ export function createShim(cfg) {
 
   const server = http.createServer((req, res) => {
     handle(req, res).catch((e) => {
-      trace('handler error', e.message, e.stack?.split('\n')[1]?.trim());
+      trace('handler error', e.message, e.cause?.code, e.cause?.message, e.stack?.split('\n')[1]?.trim());
       log('error:', e.message);
       if (!res.headersSent) { res.writeHead(e.status || 502, { 'content-type': 'text/plain' }); res.end(`shim error: ${e.message}`); }
       else res.destroy();
