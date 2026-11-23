@@ -127,6 +127,7 @@ Worker (`wrangler.toml` / secrets):
 | `SHIM_TOKEN` | — | Shared token |
 | `ALLOW_HOSTS` | `opencode.ai` | Upstream allowlist |
 | `KV_TTL` | `14400` | Seconds a stored body lives |
+| `STORE_WAIT_MS` | `500` | Max time to wait for a KV write before abandoning it |
 | `MAX_BODY` | `64 MiB` | Maximum rebuilt body |
 | `UPSTREAM_API_KEY` | — | Optional injected key (untested against Zen) |
 
@@ -138,7 +139,7 @@ Worker (`wrangler.toml` / secrets):
 ## Limits and caveats
 
 - **Free KV:** 100,000 reads/day and 1,000 writes/day (per account, shared across Workers), 1 GB storage, 25 MiB max value. Paid Workers removes the cap.
-- **Base pinning saves writes:** the shim decides when to commit a new base — only when the recipe grows past `STORE_DELTA_MIN` or the base ages past `STORE_AGE_MAX`. Several turns reuse the same KV value. Pinning is per `x-opencode-session`, so concurrent sessions don't churn each other's base (requests without a session header share a `default` pin). If a write fails (e.g. the daily quota runs out), the shim keeps using the old base, so deltas continue with that prefix rather than re-uploading every turn. A 409 (base evicted or expired) clears that session's pin and forces one full resend.
+- **Base pinning saves writes:** the shim decides when to commit a new base — only when the recipe grows past `STORE_DELTA_MIN` or the base ages past `STORE_AGE_MAX`. Several turns reuse the same KV value. Pinning is per `x-opencode-session`, so concurrent sessions don't churn each other's base (requests without a session header share a `default` pin). If a write fails (e.g. the daily quota runs out) or takes longer than `STORE_WAIT_MS`, the shim keeps using the old base, so deltas continue with that prefix rather than re-uploading every turn. A slow write is abandoned rather than finished in the background: its new hash is never reported to the shim, so completing it would only consume quota. A 409 (base evicted or expired) clears that session's pin and forces one full resend.
 - **Worker CPU:** copying the stored body takes ~1 ms at 0.4 MB, ~8 ms at 10 MB. Free plan allows 10 ms per invocation; large histories may be tight.
 - Bodies over 25 MiB are forwarded but not stored.
 - After compaction/pruning rewrites old history, the next request re-uploads most of the body once, then deltas resume.
@@ -153,7 +154,7 @@ Worker (`wrangler.toml` / secrets):
 npm test
 ```
 
-20 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
+22 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, slow-write timeout, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
 
 ## License
 

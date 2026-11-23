@@ -11,6 +11,7 @@
 //   ALLOW_HOSTS   comma list, default "opencode.ai", "*.example.com" allowed
 //   UPSTREAM_API_KEY  optional secret: injected as the upstream key (untested against Zen)
 //   KV_TTL        seconds a stored body lives, default 14400
+//   STORE_WAIT_MS ms to wait for a KV write before falling back to waitUntil, default 500
 //   MAX_BODY      bytes, default 64 MiB
 //   ALLOW_HTTP    "1" to allow http:// targets (tests only)
 
@@ -127,16 +128,25 @@ export default {
     // so deltas continue even when the free-plan write quota is exhausted.
     let stored = '0', currentBase = baseHash || '';
     if (resultHash && out.length <= KV_VALUE_MAX) {
-      try {
-        await env.KV.put(`b:${resultHash}`, out, {
-          expirationTtl: Math.max(60, Number(env.KV_TTL) || 14400),
-          metadata: { t: Date.now() },
-        });
+      const waitRaw = Number(env.STORE_WAIT_MS);
+      const waitMs = Number.isFinite(waitRaw) ? waitRaw : 500;
+      // Only wait briefly on the critical path. Slow writes continue via waitUntil;
+      // in that case the shim keeps the old base, which is still valid in KV.
+      const settled = env.KV.put(`b:${resultHash}`, out, {
+        expirationTtl: Math.max(60, Number(env.KV_TTL) || 14400),
+        metadata: { t: Date.now() },
+      }).then(() => 'ok', () => 'fail');
+      let timer;
+      const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), waitMs); });
+      const outcome = await Promise.race([settled, timedOut]);
+      clearTimeout(timer);
+      if (outcome === 'ok') {
         stored = '1';
         currentBase = resultHash;
-      } catch {
-        // Quota/storage failure: leave the previous base in place.
       }
+      // 'timeout' and 'fail' both leave the previous base in place. The shim never
+      // learns the abandoned hash, so a slow write is not worth completing: it would
+      // consume KV quota for a body nobody will reference.
     }
 
     // --- forward ---

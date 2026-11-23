@@ -22,10 +22,11 @@ function text(bytes) {
 
 function fakeKV() {
   const m = new Map();
-  let writes = 0, failWrites = false;
+  let writes = 0, failWrites = false, writeDelay = 0;
   return {
     store: m,
     set failWrites(v) { failWrites = v; },
+    set writeDelay(v) { writeDelay = v; },
     get writes() { return writes; },
     async get(k) { const b = m.get(k)?.value; return b ? b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) : null; },
     async getWithMetadata(k) {
@@ -37,6 +38,7 @@ function fakeKV() {
       };
     },
     async put(k, v, opts) {
+      if (writeDelay) await new Promise((r) => setTimeout(r, writeDelay));
       if (failWrites) throw new Error('KV write quota exceeded');
       m.set(k, { value: Buffer.from(v), metadata: opts?.metadata || null });
       writes++;
@@ -379,6 +381,29 @@ test('worker: refreshes the base when it ages out', async () => {
       assert.ok(t.up.seen.at(-1).body.equals(body));
     }
     assert.equal(t.w.kv.writes, 6);
+  } finally { await t.stop(); }
+});
+
+test('worker: slow KV writes fall back to waitUntil without stalling the request', async () => {
+  const t = await startAll({ storeDeltaMin: 1, storeAgeMs: 3600000 }, { STORE_WAIT_MS: '20' });
+  try {
+    const s = session();
+    s.add(16);
+    let r = await post(`${t.base}/zen/v1/messages`, s.body());
+    assert.equal(r.status, 200); await r.text();
+
+    t.w.kv.writeDelay = 600;
+    s.add(16);
+    const body = s.body();
+    const before = t.shim.stats.wireBytes;
+    const t0 = Date.now();
+    r = await post(`${t.base}/zen/v1/messages`, body);
+    const elapsed = Date.now() - t0;
+    assert.equal(r.status, 200); await r.text();
+    assert.ok(t.up.seen.at(-1).body.equals(body));
+    assert.ok(elapsed < 400, `request waited ${elapsed}ms for a slow KV write`);
+    assert.ok(t.shim.stats.wireBytes - before < 26 * 1024);
+    assert.equal(t.shim.stats.misses, 0);
   } finally { await t.stop(); }
 });
 
