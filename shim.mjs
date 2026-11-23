@@ -219,7 +219,7 @@ export function createShim(cfg) {
     let out = body;
     // Only the Worker-unavailable fallback opts in; normal passthrough stays untouched.
     if (opts.gzip && body.length >= 512 && req.method !== 'GET' && req.method !== 'HEAD') {
-      out = opts.gzipBuffer || await gzip(body, { level: 6 });
+      out = await gzip(body, { level: 6 });
       headers['content-encoding'] = 'gzip';
     }
     trace('direct send', req.method, target.href, { body: body.length, wire: out.length, gzip: !!headers['content-encoding'] });
