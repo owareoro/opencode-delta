@@ -328,7 +328,7 @@ export function createShim(cfg) {
     const inNote = compressed
       ? `in ${req._decodedEncoding} ${kb(req._wireIn)} (decoded ${kb(body.length)})`
       : `in plain ${kb(req._wireIn)}`;
-    log(`${req.method} ${new URL(req.url, 'http://x').pathname}  ${inNote} -> wire ${kb(totalWire)}` +
+    log(`${req.method} ${new URL(req.url, 'http://x').pathname}  session=${key}  ${inNote} -> wire ${kb(totalWire)}` +
       (p.baseHash ? `  (${((p.shared / body.length) * 100).toFixed(0)}% shared prefix)` : '  (full)'));
     await pipeResponse(r, res);
   }
@@ -340,7 +340,7 @@ export function createShim(cfg) {
     }
     if (req.url === '/__shim/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, stats, pinnedBases: pinned.size, cachedBodies: cache.m.size, cachedBytes: cache.bytes }));
+      return res.end(JSON.stringify({ ok: true, stats, pinnedBases: pinned.size, pinnedKeys: [...pinned.keys()], cachedBodies: cache.m.size, cachedBytes: cache.bytes }));
     }
     const target = resolveTarget(req.url);
     if (!target) { res.writeHead(404); return res.end('unknown or disallowed target'); }

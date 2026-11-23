@@ -67,7 +67,7 @@ Check it:
 curl -s http://127.0.0.1:8787/__shim/health
 ```
 
-The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. `incomingBytes` is the actual number of bytes OpenCode sent to the shim — i.e. what a direct, no-proxy upload would have put on the wire — and `compressedRequests` counts how many of those arrived with `Content-Encoding`. `fallbackWireBytes` records actual bytes sent on fallback, and `stores` counts committed bases; `pinnedBases` shows how many sessions currently hold a base. Timing counters (`totalMs`, `lastMs`, `workerMs`, `pipeMs`) are cumulative milliseconds. Each request log line shows the incoming size and encoding alongside the wire size. Set `SHIM_TRACE=1` for verbose per-request tracing.
+The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. `incomingBytes` is the actual number of bytes OpenCode sent to the shim — i.e. what a direct, no-proxy upload would have put on the wire — and `compressedRequests` counts how many of those arrived with `Content-Encoding`. `fallbackWireBytes` records actual bytes sent on fallback, and `stores` counts committed bases; `pinnedBases` and `pinnedKeys` show how many sessions currently hold a base and which session IDs they belong to. Each request log line includes `session=<id>` (falls back to `default` when no session header is present). Timing counters (`totalMs`, `lastMs`, `workerMs`, `pipeMs`) are cumulative milliseconds. Each request log line shows the incoming size and encoding alongside the wire size. Set `SHIM_TRACE=1` for verbose per-request tracing.
 
 Incoming gzipped/br/zstd request bodies are decoded before diffing, so the delta path works with compressed clients. `Content-Encoding` is stripped before forwarding.
 
