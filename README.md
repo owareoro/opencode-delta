@@ -127,7 +127,7 @@ Worker (`wrangler.toml` / secrets):
 | `SHIM_TOKEN` | — | Shared token |
 | `ALLOW_HOSTS` | `opencode.ai` | Upstream allowlist |
 | `KV_TTL` | `14400` | Seconds a stored body lives |
-| `STORE_WAIT_MS` | `500` | Max time to wait for a KV write before abandoning it |
+| `STORE_WAIT_MS` | `50` | Max time to wait for a KV write before finishing it in the background (`0` = always background) |
 | `MAX_BODY` | `64 MiB` | Maximum rebuilt body |
 | `UPSTREAM_API_KEY` | — | Optional injected key (untested against Zen) |
 
@@ -154,7 +154,7 @@ Worker (`wrangler.toml` / secrets):
 npm test
 ```
 
-23 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, slow-write timeout, 409 alternative-base retry, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
+24 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, slow-write timeout, 409 alternative-base retry, zero-wait failed-write recovery, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
 
 ## License
 

@@ -10,7 +10,7 @@ id = "REPLACE_WITH_KV_NAMESPACE_ID"
 [vars]
 ALLOW_HOSTS = "opencode.ai"
 KV_TTL = "14400"
-STORE_WAIT_MS = "500"
+STORE_WAIT_MS = "50"
 
 # Secrets (not stored in this file):
 #   npx wrangler secret put PATH_SECRET        # e.g. output of: openssl rand -hex 24
