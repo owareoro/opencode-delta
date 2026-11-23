@@ -22,10 +22,25 @@ function text(bytes) {
 
 function fakeKV() {
   const m = new Map();
+  let writes = 0, failWrites = false;
   return {
     store: m,
-    async get(k) { const b = m.get(k); return b ? b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) : null; },
-    async put(k, v) { m.set(k, Buffer.from(v)); },
+    set failWrites(v) { failWrites = v; },
+    get writes() { return writes; },
+    async get(k) { const b = m.get(k)?.value; return b ? b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) : null; },
+    async getWithMetadata(k) {
+      const rec = m.get(k);
+      if (!rec) return { value: null, metadata: null };
+      return {
+        value: rec.value.buffer.slice(rec.value.byteOffset, rec.value.byteOffset + rec.value.byteLength),
+        metadata: rec.metadata,
+      };
+    },
+    async put(k, v, opts) {
+      if (failWrites) throw new Error('KV write quota exceeded');
+      m.set(k, { value: Buffer.from(v), metadata: opts?.metadata || null });
+      writes++;
+    },
   };
 }
 
@@ -328,6 +343,74 @@ test('shim: allowlist, browser-origin and Host checks', async () => {
     // embedded form to an allowed host works
     r = await fetch(`${t.base}/r/http://127.0.0.1:${t.up.port}/zen/v1/models`);
     assert.equal(r.status, 200); await r.text();
+  } finally { await t.stop(); }
+});
+
+test('worker: reuses one base until the diff threshold is reached', async () => {
+  const t = await startAll({ storeDeltaMin: 1000000, storeAgeMs: 3600000 });
+  try {
+    const s = session();
+    for (let i = 0; i < 12; i++) {
+      s.add(16);
+      const body = s.body();
+      const r = await post(`${t.base}/zen/v1/messages`, body);
+      assert.equal(r.status, 200); await r.text();
+      assert.ok(t.up.seen.at(-1).body.equals(body), `turn ${i}: upstream body differs`);
+    }
+    assert.equal(t.w.kv.writes, 1);
+    assert.equal(t.shim.stats.misses, 0);
+  } finally { await t.stop(); }
+});
+
+test('worker: refreshes the base when it ages out', async () => {
+  const t = await startAll({ storeDeltaMin: 1000000, storeAgeMs: 0 });
+  try {
+    const s = session();
+    for (let i = 0; i < 6; i++) {
+      s.add(16);
+      const body = s.body();
+      const r = await post(`${t.base}/zen/v1/messages`, body);
+      assert.equal(r.status, 200); await r.text();
+      assert.ok(t.up.seen.at(-1).body.equals(body));
+    }
+    assert.equal(t.w.kv.writes, 6);
+  } finally { await t.stop(); }
+});
+
+test('worker: keeps using the old base when KV writes run out', async () => {
+  const t = await startAll({ storeDeltaMin: 1000000, storeAgeMs: 3600000 });
+  try {
+    const s = session();
+    const turn = async () => {
+      s.add(16);
+      const body = s.body();
+      const r = await post(`${t.base}/zen/v1/messages`, body);
+      assert.equal(r.status, 200); await r.text();
+      assert.ok(t.up.seen.at(-1).body.equals(body));
+    };
+    for (let i = 0; i < 3; i++) await turn();
+    assert.equal(t.w.kv.writes, 1);
+    t.w.kv.failWrites = true;
+    const before = t.shim.stats.wireBytes;
+    for (let i = 0; i < 3; i++) await turn();
+    assert.equal(t.w.kv.writes, 1);
+    assert.equal(t.shim.stats.misses, 0);
+    assert.ok(t.shim.stats.wireBytes - before < 60 * 1024);
+  } finally { await t.stop(); }
+});
+
+test('worker: default thresholds reduce KV writes', async () => {
+  const t = await startAll();
+  try {
+    const s = session();
+    for (let i = 0; i < 12; i++) {
+      s.add(16);
+      const body = s.body();
+      const r = await post(`${t.base}/zen/v1/messages`, body);
+      assert.equal(r.status, 200); await r.text();
+      assert.ok(t.up.seen.at(-1).body.equals(body));
+    }
+    assert.ok(t.w.kv.writes > 1 && t.w.kv.writes < 12, `writes = ${t.w.kv.writes}`);
   } finally { await t.stop(); }
 });
 

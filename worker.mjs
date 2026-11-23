@@ -122,14 +122,21 @@ export default {
       return reply(baseHash ? 409 : 400, `bad recipe: ${e.message}`, baseHash ? { 'x-delta-miss': '1' } : {});
     }
 
-    // --- store (off the critical path) ---
-    let stored = '0';
+    // --- store when the shim asks ---.
+    // The shim decides when to commit a new base; on a failed write we keep serving the old base
+    // so deltas continue even when the free-plan write quota is exhausted.
+    let stored = '0', currentBase = baseHash || '';
     if (resultHash && out.length <= KV_VALUE_MAX) {
-      stored = '1';
-      // A failed put (e.g. free-plan write quota) just means the next turn gets a 409 and re-uploads in full.
-      ctx.waitUntil(
-        env.KV.put(`b:${resultHash}`, out, { expirationTtl: Math.max(60, Number(env.KV_TTL) || 14400) }).catch(() => {}),
-      );
+      try {
+        await env.KV.put(`b:${resultHash}`, out, {
+          expirationTtl: Math.max(60, Number(env.KV_TTL) || 14400),
+          metadata: { t: Date.now() },
+        });
+        stored = '1';
+        currentBase = resultHash;
+      } catch {
+        // Quota/storage failure: leave the previous base in place.
+      }
     }
 
     // --- forward ---
@@ -151,6 +158,7 @@ export default {
     for (const [k, v] of up.headers) if (!STRIP_RES.has(k)) rh.set(k, v);
     rh.set('x-delta-worker', '1');
     rh.set('x-delta-stored', stored);
+    rh.set('x-delta-base-current', currentBase);
     return new Response(up.body, { status: up.status, statusText: up.statusText, headers: rh });
   },
 };

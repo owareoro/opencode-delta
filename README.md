@@ -66,7 +66,7 @@ Check it:
 curl -s http://127.0.0.1:8787/__shim/health
 ```
 
-The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. `incomingBytes` is the actual number of bytes OpenCode sent to the shim — i.e. what a direct, no-proxy upload would have put on the wire — and `compressedRequests` counts how many of those arrived with `Content-Encoding`. `fallbackWireBytes` records actual bytes sent on fallback. Each request log line shows the incoming size and encoding alongside the wire size. Set `SHIM_TRACE=1` for verbose per-request tracing.
+The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. `incomingBytes` is the actual number of bytes OpenCode sent to the shim — i.e. what a direct, no-proxy upload would have put on the wire — and `compressedRequests` counts how many of those arrived with `Content-Encoding`. `fallbackWireBytes` records actual bytes sent on fallback, and `stores` counts committed bases. Timing counters (`totalMs`, `lastMs`, `workerMs`, `pipeMs`) are cumulative milliseconds. Each request log line shows the incoming size and encoding alongside the wire size. Set `SHIM_TRACE=1` for verbose per-request tracing.
 
 Incoming gzipped/br/zstd request bodies are decoded before diffing, so the delta path works with compressed clients. `Content-Encoding` is stripped before forwarding.
 
@@ -107,6 +107,9 @@ Shim (`.shim.env`):
 | `ALIASES` | zen/go defaults | JSON map of path aliases |
 | `DELTA_PATHS` | `/(chat/completions|messages|responses)$` | Regex of POST paths using deltas |
 | `STORE_MIN` | `32768` | Only store bodies at least this big (lower to get deltas on short turns) |
+| `PIN_BASE` | on | Reuse one Worker base across turns; `0` disables pinning |
+| `STORE_DELTA_MIN` | `65536` | Commit a new base when the recipe grows past this many bytes |
+| `STORE_AGE_MAX` | `3600` | Or when the pinned base is this many seconds old |
 | `BASE_MIN` | `4096` | Minimum shared prefix before using a base |
 | `CACHE_MB` | `256` | In-memory body cache |
 | `FALLBACK_DIRECT` | on | Set `0` to disable direct fallback when the Worker is down |
@@ -132,7 +135,8 @@ Worker (`wrangler.toml` / secrets):
 
 ## Limits and caveats
 
-- **Free KV:** 100,000 reads/day and 1,000 writes/day (per account, shared across Workers), 1 GB storage, 25 MiB max value. One write per stored turn. At the cap the write fails quietly, the next turn gets a 409 and re-uploads in full, then deltas resume. Paid Workers removes the cap.
+- **Free KV:** 100,000 reads/day and 1,000 writes/day (per account, shared across Workers), 1 GB storage, 25 MiB max value. Paid Workers removes the cap.
+- **Base pinning saves writes:** the shim decides when to commit a new base — only when the recipe grows past `STORE_DELTA_MIN` or the base ages past `STORE_AGE_MAX`. Several turns reuse the same KV value. If a write fails (e.g. the daily quota runs out), the shim keeps using the old base, so deltas continue with that prefix rather than re-uploading every turn. A 409 (base evicted or expired) clears the pin and forces one full resend.
 - **Worker CPU:** copying the stored body takes ~1 ms at 0.4 MB, ~8 ms at 10 MB. Free plan allows 10 ms per invocation; large histories may be tight.
 - Bodies over 25 MiB are forwarded but not stored.
 - After compaction/pruning rewrites old history, the next request re-uploads most of the body once, then deltas resume.
@@ -147,7 +151,7 @@ Worker (`wrangler.toml` / secrets):
 npm test
 ```
 
-15 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
+19 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, write-quota failure, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
 
 ## License
 

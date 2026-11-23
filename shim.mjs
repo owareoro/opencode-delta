@@ -54,6 +54,8 @@ export function configFromEnv(env = process.env) {
       : { zen: 'https://opencode.ai/zen', go: 'https://opencode.ai/zen/go' },
     deltaPaths: new RegExp(env.DELTA_PATHS || '/(chat/completions|messages|responses)$'),
     storeMin: Number(env.STORE_MIN) || 32768,
+    storeDeltaMin: Number.isFinite(Number(env.STORE_DELTA_MIN)) ? Number(env.STORE_DELTA_MIN) : 64 * 1024,
+    storeAgeMs: (Number.isFinite(Number(env.STORE_AGE_MAX)) ? Number(env.STORE_AGE_MAX) : 3600) * 1000,
     baseMin: Number(env.BASE_MIN) || 4096,
     cacheBytes: (Number(env.CACHE_MB) || 256) * MiB,
     cacheCount: 16,
@@ -61,6 +63,7 @@ export function configFromEnv(env = process.env) {
     fallbackDirect: env.FALLBACK_DIRECT !== '0',
     // auto: gzip the fallback only if the incoming request was compressed; 1/0 force it.
     fallbackGzip: env.FALLBACK_GZIP === '1' ? true : env.FALLBACK_GZIP === '0' ? false : 'auto',
+    pinBase: env.PIN_BASE !== '0',
     allowInsecure: env.ALLOW_INSECURE === '1',
     quiet: env.QUIET === '1',
     trace: env.SHIM_TRACE === '1',
@@ -89,8 +92,10 @@ export function createShim(cfg) {
   const stats = {
     requests: 0, delta: 0, passthrough: 0, fullUploads: 0, misses: 0, fallbacks: 0,
     origBytes: 0, wireBytes: 0, incomingBytes: 0, compressedRequests: 0, fallbackWireBytes: 0,
-    totalMs: 0, lastMs: 0, workerMs: 0, pipeMs: 0,
+    totalMs: 0, lastMs: 0, workerMs: 0, pipeMs: 0, stores: 0,
   };
+  // The base hash the Worker currently holds. Reused across turns until it stores a new one.
+  let pinned = null;
   const log = (...a) => { if (!cfg.quiet) console.error('[shim]', ...a); };
   const trace = (...a) => { if (cfg.trace) console.error('[trace]', ...a); };
 
@@ -186,8 +191,18 @@ export function createShim(cfg) {
 
   // ---------- delta planning ----------
   function plan(body) {
+    // With pinning, always diff against the base the Worker still holds so one base can serve
+    // several turns. Without it, fall back to the best-matching cached body.
+    if (cfg.pinBase && pinned) {
+      const n = commonLen(pinned.body, 0, body, 0);
+      if (n >= cfg.baseMin) {
+        const recipe = encodeRecipe(makeRecipe(pinned.body, body), body);
+        if (recipe.length < body.length * 0.9) return { baseHash: pinned.hash, recipe, shared: n };
+      }
+    }
     let best = null, bestHash = null, bestN = 0;
     for (const [h, buf] of cache.entries()) { // oldest -> newest, so ties go to the newest
+      if (cfg.pinBase && pinned && h === pinned.hash) continue;
       const n = commonLen(buf, 0, body, 0);
       if (n >= bestN) { best = buf; bestHash = h; bestN = n; }
     }
@@ -243,8 +258,14 @@ export function createShim(cfg) {
 
   async function relayDelta(req, res, target, body, signal) {
     const hash = sha256(body);
-    const store = body.length >= cfg.storeMin;
     let p = plan(body);
+    // The shim owns the write decision: reuse the committed base until the recipe grows
+    // past STORE_DELTA_MIN or the base ages past STORE_AGE_MAX. If the write fails, keep
+    // using the old base (pinned stays unchanged) instead of re-uploading every turn.
+    const age = pinned ? Date.now() - pinned.at : Infinity;
+    const shouldStore = !cfg.pinBase || !pinned ||
+      p.recipe.length >= cfg.storeDeltaMin || age >= cfg.storeAgeMs;
+    let store = body.length >= cfg.storeMin && shouldStore;
     trace('worker send', req.method, req.url, { body: body.length, base: !!p.baseHash, recipe: p.recipe.length, store });
     const tw0 = Date.now();
     let { r, wire, err } = await sendViaWorker(req, target, body, p, hash, store, signal).catch((e) => ({ err: e }));
@@ -258,8 +279,10 @@ export function createShim(cfg) {
     if (r && r.status === 409 && r.headers.get('x-delta-miss')) {
       stats.misses++;
       if (p.baseHash) cache.delete(p.baseHash);
+      if (cfg.pinBase) pinned = null;
       await r.arrayBuffer().catch(() => {});
       p = { baseHash: null, recipe: encodeFull(body), shared: 0 };
+      store = body.length >= cfg.storeMin; // a lost base must always be re-stored
       ({ r, wire } = await sendViaWorker(req, target, body, p, hash, store, signal).catch((e) => ({ err: e })));
       totalWire += wire || 0;
     }
@@ -280,7 +303,16 @@ export function createShim(cfg) {
     if (!r) throw new Error('Worker unreachable');
 
     if (r.status === 401) log('!! Worker rejected SHIM_TOKEN (401)');
-    if (store && r.headers.get('x-delta-stored') === '1') cache.put(hash, body);
+    const stored = r.headers.get('x-delta-stored') === '1';
+    const currentBase = r.headers.get('x-delta-base-current');
+    if (stored) {
+      stats.stores++;
+      if (store) cache.put(hash, body);
+      if (cfg.pinBase) pinned = { hash, body, at: Date.now() };
+    } else if (cfg.pinBase && currentBase && pinned && currentBase !== pinned.hash) {
+      // Worker kept or switched to a different base; follow it.
+      pinned = null;
+    }
 
     stats.delta++; if (!p.baseHash) stats.fullUploads++;
     stats.origBytes += body.length; stats.wireBytes += totalWire;
