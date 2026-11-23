@@ -418,6 +418,35 @@ test('worker: slow KV writes finish in background and still advance the pin', as
   } finally { await t.stop(); }
 });
 
+test('worker: a 409 retries against another cached base before a full resend', async () => {
+  const t = await startAll({ storeDeltaMin: 1, storeAgeMs: 3600000 }, { STORE_WAIT_MS: '20' });
+  try {
+    const s = session();
+    s.add(16);
+    let r = await post(`${t.base}/zen/v1/messages`, s.body());
+    assert.equal(r.status, 200); await r.text();
+    const fullUploads = t.shim.stats.fullUploads;
+
+    t.w.kv.writeDelay = 600;
+    s.add(16);
+    r = await post(`${t.base}/zen/v1/messages`, s.body());
+    assert.equal(r.status, 200); await r.text();
+
+    // Immediately follow up: the optimistic pin's background write hasn't landed, so KV
+    // misses it. The shim should retry a delta against the previous confirmed base.
+    s.add(16);
+    const body = s.body();
+    const before = t.shim.stats.wireBytes;
+    r = await post(`${t.base}/zen/v1/messages`, body);
+    assert.equal(r.status, 200); await r.text();
+    assert.ok(t.up.seen.at(-1).body.equals(body));
+    assert.equal(t.shim.stats.misses, 1);
+    assert.ok(t.shim.stats.altBaseRetries >= 1, 'expected an alternative-base retry');
+    assert.equal(t.shim.stats.fullUploads, fullUploads, 'should not have fallen back to a full upload');
+    assert.ok(t.shim.stats.wireBytes - before < 60 * 1024);
+  } finally { await t.stop(); }
+});
+
 test('worker: keeps a separate pinned base per session', async () => {
   const t = await startAll({ storeDeltaMin: 1000000, storeAgeMs: 3600000 });
   try {

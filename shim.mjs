@@ -93,7 +93,7 @@ export function createShim(cfg) {
   const stats = {
     requests: 0, delta: 0, passthrough: 0, fullUploads: 0, misses: 0, fallbacks: 0,
     origBytes: 0, wireBytes: 0, incomingBytes: 0, compressedRequests: 0, fallbackWireBytes: 0,
-    totalMs: 0, lastMs: 0, workerMs: 0, pipeMs: 0, stores: 0,
+    totalMs: 0, lastMs: 0, workerMs: 0, pipeMs: 0, stores: 0, altBaseRetries: 0,
   };
   // One committed base per OpenCode session, so concurrent sessions don't churn each other's base.
   const pinned = new Map();
@@ -289,10 +289,37 @@ export function createShim(cfg) {
       if (p.baseHash) cache.delete(p.baseHash);
       if (cfg.pinBase) pinned.delete(key);
       await r.arrayBuffer().catch(() => {});
-      p = { baseHash: null, recipe: encodeFull(body), shared: 0 };
-      store = body.length >= cfg.storeMin; // a lost base must always be re-stored
-      ({ r, wire } = await sendViaWorker(req, target, body, p, hash, store, signal).catch((e) => ({ err: e })));
-      totalWire += wire || 0;
+
+      // Middle ground before a full resend: try another cached body as the base.
+      // This commonly happens when an optimistic pin's background write hasn't landed yet;
+      // the previous, confirmed base is still in KV and in our cache.
+      const candidates = [...cache.entries()]
+        .filter(([h]) => h !== p.baseHash)
+        .map(([h, buf]) => {
+          const n = commonLen(buf, 0, body, 0);
+          return { h, n, recipe: n >= cfg.baseMin ? encodeRecipe(makeRecipe(buf, body), body) : null };
+        })
+        .filter((c) => c.recipe && c.recipe.length < body.length * 0.9)
+        .sort((a, b) => b.n - a.n)
+        .slice(0, 3);
+
+      for (const c of candidates) {
+        stats.altBaseRetries++;
+        p = { baseHash: c.h, recipe: c.recipe, shared: c.n };
+        store = body.length >= cfg.storeMin;
+        ({ r, wire } = await sendViaWorker(req, target, body, p, hash, store, signal).catch((e) => ({ err: e })));
+        totalWire += wire || 0;
+        if (!r || r.status !== 409 || !r.headers.get('x-delta-miss')) break;
+        cache.delete(c.h);
+        await r.arrayBuffer().catch(() => {});
+      }
+
+      if (r && r.status === 409 && r.headers.get('x-delta-miss')) {
+        p = { baseHash: null, recipe: encodeFull(body), shared: 0 };
+        store = body.length >= cfg.storeMin; // a lost base must always be re-stored
+        ({ r, wire } = await sendViaWorker(req, target, body, p, hash, store, signal).catch((e) => ({ err: e })));
+        totalWire += wire || 0;
+      }
     }
 
     const workerBroke = !r || !r.headers.get('x-delta-worker');

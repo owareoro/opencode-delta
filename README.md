@@ -67,7 +67,7 @@ Check it:
 curl -s http://127.0.0.1:8787/__shim/health
 ```
 
-The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. `incomingBytes` is the actual number of bytes OpenCode sent to the shim — i.e. what a direct, no-proxy upload would have put on the wire — and `compressedRequests` counts how many of those arrived with `Content-Encoding`. `fallbackWireBytes` records actual bytes sent on fallback, and `stores` counts committed bases; `pinnedBases` and `pinnedKeys` show how many sessions currently hold a base and which session IDs they belong to. Each request log line includes `session=<id>` (falls back to `default` when no session header is present). Timing counters (`totalMs`, `lastMs`, `workerMs`, `pipeMs`) are cumulative milliseconds. Each request log line shows the incoming size and encoding alongside the wire size. Set `SHIM_TRACE=1` for verbose per-request tracing.
+The health response shows `origBytes` vs `wireBytes`, plus delta/fallback counters. `incomingBytes` is the actual number of bytes OpenCode sent to the shim — i.e. what a direct, no-proxy upload would have put on the wire — and `compressedRequests` counts how many of those arrived with `Content-Encoding`. `fallbackWireBytes` records actual bytes sent on fallback, and `stores` counts committed bases; `altBaseRetries` counts 409s recovered by retrying a different cached base; `pinnedBases` and `pinnedKeys` show how many sessions currently hold a base and which session IDs they belong to. Each request log line includes `session=<id>` (falls back to `default` when no session header is present). Timing counters (`totalMs`, `lastMs`, `workerMs`, `pipeMs`) are cumulative milliseconds. Each request log line shows the incoming size and encoding alongside the wire size. Set `SHIM_TRACE=1` for verbose per-request tracing.
 
 Incoming gzipped/br/zstd request bodies are decoded before diffing, so the delta path works with compressed clients. `Content-Encoding` is stripped before forwarding.
 
@@ -139,7 +139,7 @@ Worker (`wrangler.toml` / secrets):
 ## Limits and caveats
 
 - **Free KV:** 100,000 reads/day and 1,000 writes/day (per account, shared across Workers), 1 GB storage, 25 MiB max value. Paid Workers removes the cap.
-- **Base pinning saves writes:** the shim decides when to commit a new base — only when the recipe grows past `STORE_DELTA_MIN` or the base ages past `STORE_AGE_MAX`. Several turns reuse the same KV value. Pinning is per `x-opencode-session`, so concurrent sessions don't churn each other's base (requests without a session header share a `default` pin). If a write fails (e.g. the daily quota runs out), the shim keeps using the old base, so deltas continue with that prefix rather than re-uploading every turn. If a write exceeds `STORE_WAIT_MS`, the Worker finishes it in the background and reports the new base immediately — latency stays bounded and the base still advances. A 409 (base evicted or expired, or a background write that ultimately failed) clears that session's pin and forces one full resend.
+- **Base pinning saves writes:** the shim decides when to commit a new base — only when the recipe grows past `STORE_DELTA_MIN` or the base ages past `STORE_AGE_MAX`. Several turns reuse the same KV value. Pinning is per `x-opencode-session`, so concurrent sessions don't churn each other's base (requests without a session header share a `default` pin). If a write fails (e.g. the daily quota runs out), the shim keeps using the old base, so deltas continue with that prefix rather than re-uploading every turn. If a write exceeds `STORE_WAIT_MS`, the Worker finishes it in the background and reports the new base immediately — latency stays bounded and the base still advances. A 409 (base evicted or expired, or a background write that hasn't landed yet) clears that session's pin, then retries a delta against up to three other cached bodies before resorting to a full resend. That middle step avoids a full upload when a confirmed older base is still in KV.
 - **Worker CPU:** copying the stored body takes ~1 ms at 0.4 MB, ~8 ms at 10 MB. Free plan allows 10 ms per invocation; large histories may be tight.
 - Bodies over 25 MiB are forwarded but not stored.
 - After compaction/pruning rewrites old history, the next request re-uploads most of the body once, then deltas resume.
@@ -154,7 +154,7 @@ Worker (`wrangler.toml` / secrets):
 npm test
 ```
 
-22 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, slow-write timeout, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
+23 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, slow-write timeout, 409 alternative-base retry, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
 
 ## License
 
