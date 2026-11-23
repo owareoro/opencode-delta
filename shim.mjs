@@ -158,6 +158,11 @@ export function createShim(cfg) {
   async function pipeResponse(r, res) {
     const headers = {};
     for (const [k, v] of r.headers) if (!STRIP_RES.has(k) && !k.startsWith('x-delta-')) headers[k] = v;
+    if (r.status >= 400) {
+      const errBody = (await r.clone().text().catch(() => '')).slice(0, 2000);
+      stats.lastError = { status: r.status, body: errBody, at: new Date().toISOString() };
+      log(`!! response ${r.status}: ${errBody.slice(0, 240)}`);
+    }
     trace('pipe start', r.status, 'ct', r.headers.get('content-type'), 'te', r.headers.get('transfer-encoding'), 'len', r.headers.get('content-length'));
     res.writeHead(r.status, headers);
     res.flushHeaders();
