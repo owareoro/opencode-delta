@@ -384,7 +384,7 @@ test('worker: refreshes the base when it ages out', async () => {
   } finally { await t.stop(); }
 });
 
-test('worker: slow KV writes fall back to waitUntil without stalling the request', async () => {
+test('worker: slow KV writes finish in background and still advance the pin', async () => {
   const t = await startAll({ storeDeltaMin: 1, storeAgeMs: 3600000 }, { STORE_WAIT_MS: '20' });
   try {
     const s = session();
@@ -403,6 +403,17 @@ test('worker: slow KV writes fall back to waitUntil without stalling the request
     assert.ok(t.up.seen.at(-1).body.equals(body));
     assert.ok(elapsed < 400, `request waited ${elapsed}ms for a slow KV write`);
     assert.ok(t.shim.stats.wireBytes - before < 26 * 1024);
+    assert.equal(t.shim.stats.misses, 0);
+
+    // The background write must land, so the next turn uses the new base with no 409.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    s.add(16);
+    const body2 = s.body();
+    const before2 = t.shim.stats.wireBytes;
+    r = await post(`${t.base}/zen/v1/messages`, body2);
+    assert.equal(r.status, 200); await r.text();
+    assert.ok(t.up.seen.at(-1).body.equals(body2));
+    assert.ok(t.shim.stats.wireBytes - before2 < 26 * 1024);
     assert.equal(t.shim.stats.misses, 0);
   } finally { await t.stop(); }
 });

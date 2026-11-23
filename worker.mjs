@@ -143,10 +143,14 @@ export default {
       if (outcome === 'ok') {
         stored = '1';
         currentBase = resultHash;
+      } else if (outcome === 'timeout') {
+        // Keep the 500 ms latency bound, but let the write finish and advance the pin.
+        // Otherwise the base never refreshes and recipes grow until they approach a full body.
+        ctx.waitUntil(settled);
+        stored = '1';
+        currentBase = resultHash;
       }
-      // 'timeout' and 'fail' both leave the previous base in place. The shim never
-      // learns the abandoned hash, so a slow write is not worth completing: it would
-      // consume KV quota for a body nobody will reference.
+      // A hard 'fail' leaves the previous base in place.
     }
 
     // --- forward ---
