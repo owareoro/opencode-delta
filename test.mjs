@@ -270,6 +270,20 @@ test('e2e: fallback gzips when explicitly enabled', async () => {
   } finally { await t.stop(); }
 });
 
+test('e2e: auto fallback gzips when the incoming request was compressed', async () => {
+  const t = await startAll();
+  try {
+    t.w.state.fail = true;
+    const s = session(); s.add(40);
+    const body = s.body();
+    const r = await postGzip(`${t.base}/zen/v1/chat/completions`, body);
+    assert.equal(r.status, 200); await r.text();
+    assert.equal(t.up.seen.at(-1).headers['content-encoding'], 'gzip');
+    assert.ok(t.up.seen.at(-1).body.equals(body));
+    assert.ok(t.shim.stats.fallbackWireBytes < body.length);
+  } finally { await t.stop(); }
+});
+
 test('e2e: fallback stays plain by default', async () => {
   const t = await startAll();
   try {
