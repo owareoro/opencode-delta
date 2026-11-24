@@ -40,7 +40,7 @@ function fakeKV() {
     async put(k, v, opts) {
       if (writeDelay) await new Promise((r) => setTimeout(r, writeDelay));
       if (failWrites) throw new Error('KV write quota exceeded');
-      m.set(k, { value: Buffer.from(v), metadata: opts?.metadata || null });
+      m.set(k, { value: Buffer.from(v), metadata: opts?.metadata || null, opts });
       writes++;
     },
   };
@@ -65,7 +65,11 @@ async function startUpstream() {
 async function startWorker(overrides = {}) {
   const kv = fakeKV();
   const state = { requests: 0, fail: false };
-  const env = { PATH_SECRET: 's3cret', SHIM_TOKEN: 'tok', ALLOW_HOSTS: '127.0.0.1', ALLOW_HTTP: '1', KV: kv, ...overrides };
+  const env = {
+    PATH_SECRET: 's3cret', SHIM_TOKEN: 'tok', ALLOW_HOSTS: '127.0.0.1', ALLOW_HTTP: '1', KV: kv,
+    ENC_KEY: Buffer.from('0123456789abcdef0123456789abcdef').toString('base64'),
+    ...overrides,
+  };
   const server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
     state.requests++;
@@ -527,6 +531,67 @@ test('worker: default thresholds reduce KV writes', async () => {
       assert.ok(t.up.seen.at(-1).body.equals(body));
     }
     assert.ok(t.w.kv.writes > 1 && t.w.kv.writes < 12, `writes = ${t.w.kv.writes}`);
+  } finally { await t.stop(); }
+});
+
+test('worker: KV stores are encrypted and metadata records the real size', async () => {
+  const t = await startAll();
+  try {
+    const s = session(); s.add(16);
+    const body = s.body();
+    const r = await post(`${t.base}/zen/v1/messages`, body);
+    assert.equal(r.status, 200); await r.text();
+
+    const [key, entry] = [...t.w.kv.store.entries()][0];
+    assert.ok(key.startsWith('b:'));
+    const stored = entry.value;
+    assert.equal(stored.subarray(0, 3).toString(), 'DE1');
+    assert.ok(!stored.includes(Buffer.from('cache_control')), 'plaintext leaked into KV');
+
+    const k = await crypto.webcrypto.subtle.importKey(
+      'raw', Buffer.from('0123456789abcdef0123456789abcdef'), 'AES-GCM', false, ['decrypt']
+    );
+    const plain = Buffer.from(await crypto.webcrypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: stored.subarray(3, 15) }, k, stored.subarray(15)
+    ));
+    assert.ok(plain.equals(body));
+    assert.equal(entry.metadata.size, body.length);
+    assert.equal(entry.metadata.stored, stored.length);
+    assert.equal(entry.opts.expirationTtl, 14400);
+  } finally { await t.stop(); }
+});
+
+test('worker: legacy plaintext bases are still readable', async () => {
+  const t = await startAll();
+  try {
+    const s = session(); s.add(16);
+    await (await post(`${t.base}/zen/v1/messages`, s.body())).text();
+    const [key] = [...t.w.kv.store.keys()];
+    t.w.kv.store.set(key, { value: Buffer.from(s.body()), metadata: { t: Date.now() } });
+
+    s.add(16);
+    const body = s.body();
+    const r = await post(`${t.base}/zen/v1/messages`, body);
+    assert.equal(r.status, 200); await r.text();
+    assert.ok(t.up.seen.at(-1).body.equals(body));
+    assert.equal(t.shim.stats.misses, 0);
+  } finally { await t.stop(); }
+});
+
+test('worker: an unreadable encrypted base 409s and recovers', async () => {
+  const t = await startAll();
+  try {
+    const s = session(); s.add(16);
+    await (await post(`${t.base}/zen/v1/messages`, s.body())).text();
+    const [key] = [...t.w.kv.store.keys()];
+    t.w.kv.store.set(key, { value: Buffer.concat([Buffer.from('DE1'), Buffer.alloc(20, 0xff)]), metadata: null });
+
+    s.add(16);
+    const body = s.body();
+    const r = await post(`${t.base}/zen/v1/messages`, body);
+    assert.equal(r.status, 200); await r.text();
+    assert.ok(t.up.seen.at(-1).body.equals(body));
+    assert.equal(t.shim.stats.misses, 1);
   } finally { await t.stop(); }
 });
 

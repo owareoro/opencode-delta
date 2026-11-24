@@ -34,16 +34,20 @@ npx wrangler kv namespace create KV
 
 Paste the returned namespace ID into your local `wrangler.toml` where it says `REPLACE_WITH_KV_NAMESPACE_ID` (`wrangler.toml` is gitignored; `wrangler.toml.example` is the tracked template).
 
-Generate two secrets and upload them:
+Generate three secrets and upload them:
 
 ```sh
 openssl rand -hex 24              # PATH_SECRET
 openssl rand -hex 24              # SHIM_TOKEN
+openssl rand -base64 32           # ENC_KEY
 
 npx wrangler secret put PATH_SECRET
 npx wrangler secret put SHIM_TOKEN
+npx wrangler secret put ENC_KEY
 npx wrangler deploy
 ```
+
+`ENC_KEY` encrypts bodies in KV (AES-GCM, random IV per write). It is required: the Worker returns 500 without it. Existing unencrypted bases remain readable until they expire, so this can be added to a running deployment.
 
 Your Worker URL is:
 
@@ -125,6 +129,7 @@ Worker (`wrangler.toml` / secrets):
 | `KV` | — | KV namespace binding |
 | `PATH_SECRET` | — | Secret path component |
 | `SHIM_TOKEN` | — | Shared token |
+| `ENC_KEY` | — | Base64 32-byte AES-GCM key for KV bodies (required) |
 | `ALLOW_HOSTS` | `opencode.ai` | Upstream allowlist |
 | `KV_TTL` | `14400` | Seconds a stored body lives |
 | `STORE_WAIT_MS` | `50` | Max time to wait for a KV write before finishing it in the background (`0` = always background) |
@@ -139,6 +144,8 @@ Worker (`wrangler.toml` / secrets):
 ## Limits and caveats
 
 - **Free KV:** 100,000 reads/day and 1,000 writes/day (per account, shared across Workers), 1 GB storage, 25 MiB max value. Paid Workers removes the cap.
+- **Storage size:** each key's metadata has `size` (plaintext body bytes) and `stored` (encrypted bytes on disk). The Cloudflare dashboard's size figure counts all retained KV versions, so it can be much larger than the sum of current values. To see the logical total: `npx wrangler kv key list --namespace-id <id> --remote` and sum `metadata.size`.
+- **Encryption scope:** KV bodies are encrypted at rest, so a dashboard/API reader sees ciphertext. The Worker still sees plaintext because it rebuilds the body and forwards it upstream; the shim's in-memory cache is plaintext too. This is not end-to-end encryption.
 - **Base pinning saves writes:** the shim decides when to commit a new base — only when the recipe grows past `STORE_DELTA_MIN` or the base ages past `STORE_AGE_MAX`. Several turns reuse the same KV value. Pinning is per `x-opencode-session`, so concurrent sessions don't churn each other's base (requests without a session header share a `default` pin). If a write fails (e.g. the daily quota runs out), the shim keeps using the old base, so deltas continue with that prefix rather than re-uploading every turn. If a write exceeds `STORE_WAIT_MS`, the Worker finishes it in the background and reports the new base immediately — latency stays bounded and the base still advances. A 409 (base evicted or expired, or a background write that hasn't landed yet) clears that session's pin, then retries a delta against up to three other cached bodies before resorting to a full resend. That middle step avoids a full upload when a confirmed older base is still in KV.
 - **Worker CPU:** copying the stored body takes ~1 ms at 0.4 MB, ~8 ms at 10 MB. Free plan allows 10 ms per invocation; large histories may be tight.
 - Bodies over 25 MiB are forwarded but not stored.
@@ -154,7 +161,7 @@ Worker (`wrangler.toml` / secrets):
 npm test
 ```
 
-24 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, slow-write timeout, 409 alternative-base retry, zero-wait failed-write recovery, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
+27 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, slow-write timeout, 409 alternative-base retry, zero-wait failed-write recovery, encrypted stores, legacy plaintext reads, size metadata, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
 
 ## License
 

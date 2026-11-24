@@ -12,6 +12,7 @@
 //   UPSTREAM_API_KEY  optional secret: injected as the upstream key (untested against Zen)
 //   KV_TTL        seconds a stored body lives, default 14400
 //   STORE_WAIT_MS ms to wait for a KV write before falling back to waitUntil, default 500
+//   ENC_KEY       base64 32-byte AES-GCM key; bodies are encrypted at rest in KV
 //   MAX_BODY      bytes, default 64 MiB
 //   ALLOW_HTTP    "1" to allow http:// targets (tests only)
 
@@ -25,6 +26,45 @@ const STRIP_REQ = new Set([
 ]);
 const STRIP_RES = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length']);
 const HEX64 = /^[0-9a-f]{64}$/;
+
+// Stored KV layout: MAGIC(3) || IV(12) || ciphertext+tag(16).
+// Unmarked values are treated as legacy plaintext so existing bases keep working until expiry.
+const MAGIC = new Uint8Array([0x44, 0x45, 0x31]); // "DE1"
+const IV_LEN = 12;
+const TAG_LEN = 16;
+const STORED_OVERHEAD = MAGIC.length + IV_LEN + TAG_LEN;
+
+let keyCacheRaw = null, keyCachePromise = null;
+function encKey(env) {
+  const raw = env.ENC_KEY;
+  if (!raw) return null;
+  if (raw !== keyCacheRaw) {
+    keyCacheRaw = raw;
+    const bin = atob(raw.replace(/-/g, '+').replace(/_/g, '/'));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    keyCachePromise = crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  }
+  return keyCachePromise;
+}
+
+async function encodeStored(out, key) {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, out));
+  const buf = new Uint8Array(MAGIC.length + iv.length + ct.length);
+  buf.set(MAGIC, 0); buf.set(iv, MAGIC.length); buf.set(ct, MAGIC.length + iv.length);
+  return buf;
+}
+
+async function decodeStored(bytes, key) {
+  if (bytes.length >= MAGIC.length && bytes[0] === MAGIC[0] && bytes[1] === MAGIC[1] && bytes[2] === MAGIC[2]) {
+    if (!key) throw new Error('ENC_KEY missing');
+    const iv = bytes.subarray(MAGIC.length, MAGIC.length + IV_LEN);
+    const ct = bytes.subarray(MAGIC.length + IV_LEN);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
+  }
+  return bytes;
+}
 
 function reply(status, text, extra = {}) {
   return new Response(text, { status, headers: { 'x-delta-worker': '1', ...extra } });
@@ -75,7 +115,8 @@ export function applyRecipe(base, recipe, outLen) {
 
 export default {
   async fetch(req, env, ctx) {
-    if (!env.PATH_SECRET || !env.SHIM_TOKEN || !env.KV) return new Response('misconfigured', { status: 500 });
+    if (!env.PATH_SECRET || !env.SHIM_TOKEN || !env.KV || !env.ENC_KEY) return new Response('misconfigured', { status: 500 });
+    const key = await encKey(env);
 
     const url = new URL(req.url);
     if (req.method !== 'POST' || url.pathname !== `/${env.PATH_SECRET}/relay`) {
@@ -115,7 +156,8 @@ export default {
     if (baseHash) {
       const b = await env.KV.get(`b:${baseHash}`, 'arrayBuffer');
       if (!b) return reply(409, 'base missing', { 'x-delta-miss': '1' });
-      base = new Uint8Array(b);
+      try { base = await decodeStored(new Uint8Array(b), key); }
+      catch { return reply(409, 'base unreadable', { 'x-delta-miss': '1' }); }
     }
 
     let out;
@@ -127,15 +169,16 @@ export default {
     // The shim decides when to commit a new base; on a failed write we keep serving the old base
     // so deltas continue even when the free-plan write quota is exhausted.
     let stored = '0', currentBase = baseHash || '';
-    if (resultHash && out.length <= KV_VALUE_MAX) {
+    if (resultHash && out.length + STORED_OVERHEAD <= KV_VALUE_MAX) {
       const waitRaw = Number(env.STORE_WAIT_MS);
       const waitMs = Number.isFinite(waitRaw) ? waitRaw : 500;
-      // Only wait briefly on the critical path. Slow writes continue via waitUntil;
-      // in that case the shim keeps the old base, which is still valid in KV.
-      const settled = env.KV.put(`b:${resultHash}`, out, {
+      // Only wait briefly on the critical path. Slow writes continue via waitUntil and still
+      // advance the pin (the 409 path in the shim recovers if the write ultimately fails).
+      const settled = encodeStored(out, key).then((payload) => env.KV.put(`b:${resultHash}`, payload, {
         expirationTtl: Math.max(60, Number(env.KV_TTL) || 14400),
-        metadata: { t: Date.now() },
-      }).then(() => 'ok', () => 'fail');
+        // Dashboard "size" counts all KV versions; these are the real logical sizes.
+        metadata: { t: Date.now(), size: out.length, stored: payload.length },
+      })).then(() => 'ok', () => 'fail');
       let timer;
       const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), waitMs); });
       const outcome = await Promise.race([settled, timedOut]);
@@ -144,7 +187,7 @@ export default {
         stored = '1';
         currentBase = resultHash;
       } else if (outcome === 'timeout') {
-        // Keep the 500 ms latency bound, but let the write finish and advance the pin.
+        // Keep the STORE_WAIT_MS latency bound, but let the write finish and advance the pin.
         // Otherwise the base never refreshes and recipes grow until they approach a full body.
         ctx.waitUntil(settled);
         stored = '1';
