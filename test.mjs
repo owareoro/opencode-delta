@@ -545,14 +545,14 @@ test('worker: KV stores are encrypted and metadata records the real size', async
     const [key, entry] = [...t.w.kv.store.entries()][0];
     assert.ok(key.startsWith('b:'));
     const stored = entry.value;
-    assert.equal(stored.subarray(0, 3).toString(), 'DE1');
     assert.ok(!stored.includes(Buffer.from('cache_control')), 'plaintext leaked into KV');
+    assert.equal(stored.length, body.length + 28); // 12-byte IV + 16-byte tag, no marker
 
     const k = await crypto.webcrypto.subtle.importKey(
       'raw', Buffer.from('0123456789abcdef0123456789abcdef'), 'AES-GCM', false, ['decrypt']
     );
     const plain = Buffer.from(await crypto.webcrypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: stored.subarray(3, 15) }, k, stored.subarray(15)
+      { name: 'AES-GCM', iv: stored.subarray(0, 12) }, k, stored.subarray(12)
     ));
     assert.ok(plain.equals(body));
     assert.equal(entry.metadata.size, body.length);
@@ -561,13 +561,20 @@ test('worker: KV stores are encrypted and metadata records the real size', async
   } finally { await t.stop(); }
 });
 
-test('worker: legacy plaintext bases are still readable', async () => {
+test('worker: old marked stores are still readable', async () => {
   const t = await startAll();
   try {
     const s = session(); s.add(16);
-    await (await post(`${t.base}/zen/v1/messages`, s.body())).text();
+    const first = s.body();
+    await (await post(`${t.base}/zen/v1/messages`, first)).text();
     const [key] = [...t.w.kv.store.keys()];
-    t.w.kv.store.set(key, { value: Buffer.from(s.body()), metadata: { t: Date.now() } });
+
+    const k = await crypto.webcrypto.subtle.importKey(
+      'raw', Buffer.from('0123456789abcdef0123456789abcdef'), 'AES-GCM', false, ['encrypt']
+    );
+    const iv = crypto.webcrypto.getRandomValues(new Uint8Array(12));
+    const ct = Buffer.from(await crypto.webcrypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, first));
+    t.w.kv.store.set(key, { value: Buffer.concat([Buffer.from('DE1'), Buffer.from(iv), ct]), metadata: null });
 
     s.add(16);
     const body = s.body();

@@ -27,12 +27,12 @@ const STRIP_REQ = new Set([
 const STRIP_RES = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length']);
 const HEX64 = /^[0-9a-f]{64}$/;
 
-// Stored KV layout: MAGIC(3) || IV(12) || ciphertext+tag(16).
-// Unmarked values are treated as legacy plaintext so existing bases keep working until expiry.
-const MAGIC = new Uint8Array([0x44, 0x45, 0x31]); // "DE1"
+// Stored KV layout: IV(12) || ciphertext+tag(16).
+// Old writes had a 3-byte "DE1" prefix; still readable, but no longer written.
+const OLD_MARK = new Uint8Array([0x44, 0x45, 0x31]); // "DE1"
 const IV_LEN = 12;
 const TAG_LEN = 16;
-const STORED_OVERHEAD = MAGIC.length + IV_LEN + TAG_LEN;
+const STORED_OVERHEAD = IV_LEN + TAG_LEN;
 
 let keyCacheRaw = null, keyCachePromise = null;
 function encKey(env) {
@@ -51,19 +51,18 @@ function encKey(env) {
 async function encodeStored(out, key) {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, out));
-  const buf = new Uint8Array(MAGIC.length + iv.length + ct.length);
-  buf.set(MAGIC, 0); buf.set(iv, MAGIC.length); buf.set(ct, MAGIC.length + iv.length);
+  const buf = new Uint8Array(iv.length + ct.length);
+  buf.set(iv, 0); buf.set(ct, iv.length);
   return buf;
 }
 
 async function decodeStored(bytes, key) {
-  if (bytes.length >= MAGIC.length && bytes[0] === MAGIC[0] && bytes[1] === MAGIC[1] && bytes[2] === MAGIC[2]) {
-    if (!key) throw new Error('ENC_KEY missing');
-    const iv = bytes.subarray(MAGIC.length, MAGIC.length + IV_LEN);
-    const ct = bytes.subarray(MAGIC.length + IV_LEN);
-    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
-  }
-  return bytes;
+  if (!key) throw new Error('ENC_KEY missing');
+  const off = bytes.length >= OLD_MARK.length && bytes[0] === OLD_MARK[0] &&
+    bytes[1] === OLD_MARK[1] && bytes[2] === OLD_MARK[2] ? OLD_MARK.length : 0;
+  const iv = bytes.subarray(off, off + IV_LEN);
+  const ct = bytes.subarray(off + IV_LEN);
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
 }
 
 function reply(status, text, extra = {}) {

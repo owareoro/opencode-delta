@@ -47,7 +47,7 @@ npx wrangler secret put ENC_KEY
 npx wrangler deploy
 ```
 
-`ENC_KEY` encrypts bodies in KV (AES-GCM, random IV per write). It is required: the Worker returns 500 without it. Existing unencrypted bases remain readable until they expire, so this can be added to a running deployment.
+`ENC_KEY` encrypts bodies in KV (AES-GCM, random IV per write). It is required: the Worker returns 500 without it. Each stored value is `IV(12) || ciphertext+tag(16)`; an older `DE1`-prefixed format is still readable but no longer written.
 
 Your Worker URL is:
 
@@ -161,7 +161,7 @@ Worker (`wrangler.toml` / secrets):
 npm test
 ```
 
-27 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, slow-write timeout, 409 alternative-base retry, zero-wait failed-write recovery, encrypted stores, legacy plaintext reads, size metadata, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
+27 tests: diff round-trips, a 12-turn session, streaming, KV loss, fallback, compressed requests, gzip fallback negotiation, base reuse, age refresh, per-session pinning, write-quota failure, slow-write timeout, 409 alternative-base retry, zero-wait failed-write recovery, encrypted stores, old marked-store reads, size metadata, allowlists. Tested against a mock upstream and `wrangler dev --local`; not against every deployed provider.
 
 ## License
 
